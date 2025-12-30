@@ -409,5 +409,175 @@ app.delete('/eliminarVenta/:id', async (req, res) => {
 });
 
 
+app.get('/buscarProducto', async (req, res) => {
+  const { q } = req.query; // q puede ser nombre, código o fecha en dd/mm/yyyy
+
+  if (!q) return res.status(400).json({ error: "Falta parámetro: q" });
+
+  try {
+    let filter = supabase.from('producto');
+
+    // Detectar si es fecha (dd/mm/yyyy)
+    const fechaRegex = /^\d{2}\/\d{2}\/\d{4}$/;
+    if (fechaRegex.test(q)) {
+      const [dia, mes, año] = q.split('/');
+      const fechaInicio = new Date(`${año}-${mes}-${dia}T00:00:00`);
+      const fechaFin = new Date(`${año}-${mes}-${dia}T23:59:59`);
+
+      const { data, error } = await filter
+        .select('*')
+        .gte('fecha_agregado', fechaInicio.toISOString())
+        .lte('fecha_agregado', fechaFin.toISOString())
+        .order('fecha_agregado', { ascending: false });
+
+      if (error) return res.status(400).json({ error: error.message });
+
+      // Formatear fecha para respuesta
+      const resultados = data.map(p => ({
+        ...p,
+        fecha_agregado: new Date(p.fecha_agregado).toLocaleDateString('es-ES')
+      }));
+
+      return res.json(resultados);
+    }
+
+    // Si no es fecha, buscar por nombre o código
+    const { data, error } = await filter
+      .select('*')
+      .or(`nombre.ilike.%${q}%,codigo.ilike.%${q}%`)
+      .order('fecha_agregado', { ascending: false });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Formatear fecha
+    const resultados = data.map(p => ({
+      ...p,
+      fecha_agregado: new Date(p.fecha_agregado).toLocaleDateString('es-ES')
+    }));
+
+    res.json(resultados);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Buscar producto por código
+app.get('/buscarProductoCodigo/:codigo', async (req, res) => {
+  const { codigo } = req.params;
+
+  if (!codigo) {
+    return res.status(400).json({ error: "Falta parámetro: codigo" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('producto')
+      .select('*')
+      .eq('codigo', codigo)
+      .single(); // 'single' porque el código debe ser único
+
+    if (error) {
+      return res.status(404).json({ error: `Producto con código ${codigo} no encontrado` });
+    }
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
+app.get('/fechasProductos', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('producto')
+      .select('fecha_agregado')
+      .order('fecha_agregado', { ascending: true });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Convertir a formato "12 de diciembre de 2025" y eliminar duplicados
+    const fechasUnicas = [...new Set(
+      data.map(p => new Date(p.fecha_agregado).toLocaleDateString('es-ES', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      }))
+    )];
+
+    res.json(fechasUnicas);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/categorias', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('categoria')
+      .select('*')
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/getDatos', async (req, res) => {
+  try {
+    // 1️⃣ Total ganado (suma de ventas)
+    const { data: ventas, error: ventasError } = await supabase
+      .from('venta')
+      .select('total, descuento');
+
+    if (ventasError) return res.status(400).json({ error: ventasError.message });
+
+    const totalGanado = ventas.reduce((acc, v) => acc + v.total, 0);
+
+    // 2️⃣ Total de costo (suma de precio_compra * cantidad vendida)
+    const { data: detalles, error: detallesError } = await supabase
+      .from('detalle_venta')
+      .select('producto_id, cantidad');
+
+    if (detallesError) return res.status(400).json({ error: detallesError.message });
+
+    // Obtener info de productos
+    const { data: productos, error: productosError } = await supabase
+      .from('producto')
+      .select('id, cantidad, precio_compra');
+
+    if (productosError) return res.status(400).json({ error: productosError.message });
+
+    // Crear un mapa de productos para acceso rápido
+    const productosMap = {};
+    productos.forEach(p => { productosMap[p.id] = p; });
+
+    let totalCosto = 0;
+    detalles.forEach(d => {
+      const producto = productosMap[d.producto_id];
+      if (producto) totalCosto += producto.precio_compra * d.cantidad;
+    });
+
+    // 3️⃣ Profit
+    const profit = totalGanado - totalCosto;
+
+    // 4️⃣ Cantidad de productos disponibles y vendidos
+    const totalProductosDisponibles = productos.reduce((acc, p) => acc + p.cantidad, 0);
+    const totalProductosVendidos = detalles.reduce((acc, d) => acc + d.cantidad, 0);
+    const totalProductos = totalProductosDisponibles + totalProductosVendidos;
+
+    res.json({
+      totalGanado,
+      totalCosto,
+      profit,
+      totalProductosDisponibles,
+      totalProductosVendidos,
+      totalProductos
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
